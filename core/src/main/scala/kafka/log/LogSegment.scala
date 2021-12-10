@@ -53,14 +53,15 @@ import scala.math._
  * @param time The time instance
  */
 @nonthreadsafe
-class LogSegment private[log] (val log: FileRecords,
-                               val lazyOffsetIndex: LazyIndex[OffsetIndex],
-                               val lazyTimeIndex: LazyIndex[TimeIndex],
-                               val txnIndex: TransactionIndex,
-                               val baseOffset: Long,
-                               val indexIntervalBytes: Int,
-                               val rollJitterMs: Long,
-                               val time: Time) extends Logging {
+class LogSegment private[log] (val log: FileRecords, //包含日志条目的文件记录
+                               val lazyOffsetIndex: LazyIndex[OffsetIndex], // 偏移索引
+                               val lazyTimeIndex: LazyIndex[TimeIndex], // 时间戳索引
+                               val txnIndex: TransactionIndex, // 事务索引
+                               val baseOffset: Long, // 该日志段的基准偏移量，也是该日志段的偏移量下限
+                               val indexIntervalBytes: Int, // 索引中每个条目之间的近似字节数
+                               val rollJitterMs: Long, // 从计划的日志段回滚时间中减去最大随机抖动的时间
+                               val time: Time // 时间实例
+                              ) extends Logging {
 
   def offsetIndex: OffsetIndex = lazyOffsetIndex.get
 
@@ -141,38 +142,53 @@ class LogSegment private[log] (val log: FileRecords,
    * @throws LogSegmentOffsetOverflowException if the largest offset causes index offset overflow
    */
   @nonthreadsafe
-  def append(largestOffset: Long,
-             largestTimestamp: Long,
-             shallowOffsetOfMaxTimestamp: Long,
-             records: MemoryRecords): Unit = {
+  def append(largestOffset: Long, // 最大偏移量，即消息集合的末尾
+             largestTimestamp: Long, // 最大时间戳
+             shallowOffsetOfMaxTimestamp: Long, // 要追加的消息中具有最大时间戳的消息的偏移量
+             records: MemoryRecords // 要追加的日志记录
+            ): Unit = {
+    // 追加日志记录不为空
     if (records.sizeInBytes > 0) {
+      // 输出日志
       trace(s"Inserting ${records.sizeInBytes} bytes at end offset $largestOffset at position ${log.sizeInBytes} " +
             s"with largest timestamp $largestTimestamp at shallow offset $shallowOffsetOfMaxTimestamp")
+      // 日志文件的物理地址
       val physicalPosition = log.sizeInBytes()
       if (physicalPosition == 0)
+        // 如果日志文件为空
+        // 用最大时间戳作为基于时间回滚和压缩延迟的时间
         rollingBasedTimestamp = Some(largestTimestamp)
 
+      // <1> 判断largestOffset相对偏移量是否在[0,MAX_INTEGER]内，不在则抛出异常
       ensureOffsetInRange(largestOffset)
 
       // append the messages
+      // <2> 将记录追加写入到log
       val appendedBytes = log.append(records)
       trace(s"Appended $appendedBytes to ${log.file} at end offset $largestOffset")
       // Update the in memory max timestamp and corresponding offset.
+      // 更新内存中的最大时间戳和对应的最大偏移量
       if (largestTimestamp > maxTimestampSoFar) {
         maxTimestampSoFar = largestTimestamp
         offsetOfMaxTimestampSoFar = shallowOffsetOfMaxTimestamp
       }
       // append an entry to the index (if needed)
+      // 如果存储的字节数大于了索引间隔的近似字节数，那么会开辟一个新的索引和entry
       if (bytesSinceLastIndexEntry > indexIntervalBytes) {
+        // <3> 将最大偏移量和物理地址写入offsetIndex
         offsetIndex.append(largestOffset, physicalPosition)
+        // 当最大偏移量和最大时间戳的偏移量都大于最大偏移量时，才会更新timeIndex
         timeIndex.maybeAppend(maxTimestampSoFar, offsetOfMaxTimestampSoFar)
+        // 重置标志位
         bytesSinceLastIndexEntry = 0
       }
+      // 累加当前索引存储的记录字节数
       bytesSinceLastIndexEntry += records.sizeInBytes
     }
   }
 
   private def ensureOffsetInRange(offset: Long): Unit = {
+    // 转换给定偏移量为相对偏移量，并检查是否有效[0, Int.MaxValue]
     if (!canConvertToRelativeOffset(offset))
       throw new LogSegmentOffsetOverflowException(this, offset)
   }
@@ -271,7 +287,10 @@ class LogSegment private[log] (val log: FileRecords,
    */
   @threadsafe
   private[log] def translateOffset(offset: Long, startingFilePosition: Int = 0): LogOffsetPosition = {
+    // 从偏移索引中查找给定偏移量所在位置的键值对
     val mapping = offsetIndex.lookup(offset)
+    // 从log文件中通过批处理迭代器向前搜索的方法查找给定偏移量指向的物理文件位置
+    // 返回由三部分组成，该物理文件分片的位置、大小以及要查找的消息偏移量
     log.searchForOffsetWithSize(offset, max(mapping.position, startingFilePosition))
   }
 
@@ -288,13 +307,15 @@ class LogSegment private[log] (val log: FileRecords,
    *         or null if the startOffset is larger than the largest offset in this log
    */
   @threadsafe
-  def read(startOffset: Long,
-           maxSize: Int,
-           maxPosition: Long = size,
-           minOneMessage: Boolean = false): FetchDataInfo = {
+  def read(startOffset: Long, // 要读取的消息集合的起始偏移量
+           maxSize: Int, // 要读取的消息集合的最大字节数
+           maxPosition: Long = size, // 日志段中对外可见的（可读）的最大位置
+           minOneMessage: Boolean = false // 如果为true，即使超过了maxSize（如果存在），也会返回第一条消息
+          ): FetchDataInfo = {
     if (maxSize < 0)
       throw new IllegalArgumentException(s"Invalid max size $maxSize for log read from segment $log")
 
+    // 根据要读取的消息其实偏移量找到物理文件位置
     val startOffsetAndSize = translateOffset(startOffset)
 
     // if the start position is already off the end of the log, return null
@@ -302,8 +323,10 @@ class LogSegment private[log] (val log: FileRecords,
       return null
 
     val startPosition = startOffsetAndSize.position
+    // 构造日志偏移量元数据信息 包括三个要素（1.要读取的消息起始偏移量 2.该日志段的基本偏移量 3.该日志段的物理文件位置）
     val offsetMetadata = LogOffsetMetadata(startOffset, this.baseOffset, startPosition)
 
+    // 调整读取消息集合的最大字节数，minOneMessage为true的话取消息字节数和物理文件大小中最大的作为调整后的最大值
     val adjustedMaxSize =
       if (minOneMessage) math.max(maxSize, startOffsetAndSize.size)
       else maxSize
@@ -313,8 +336,10 @@ class LogSegment private[log] (val log: FileRecords,
       return FetchDataInfo(offsetMetadata, MemoryRecords.EMPTY)
 
     // calculate the length of the message set to read based on whether or not they gave us a maxOffset
+    // 根据可见的消息位置和读取消息集合的最大字节数，确定要获取的消息的字节数大小
     val fetchSize: Int = min((maxPosition - startPosition).toInt, adjustedMaxSize)
 
+    // 组装获取到的数据信息，包括偏移量元数据信息、日志的物理文件分片起始位置和大小、以及获取的消息是否完整
     FetchDataInfo(offsetMetadata, log.slice(startPosition, fetchSize),
       firstEntryIncomplete = adjustedMaxSize < startOffsetAndSize.size)
   }

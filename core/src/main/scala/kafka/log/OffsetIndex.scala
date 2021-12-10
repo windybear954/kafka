@@ -86,13 +86,19 @@ class OffsetIndex(_file: File, baseOffset: Long, maxIndexSize: Int = -1, writabl
    *         the pair (baseOffset, 0) is returned.
    */
   def lookup(targetOffset: Long): OffsetPosition = {
+    // 在windows系统下加锁，因为windows不允许在mmapped时改变文件大小
     maybeLock(lock) {
+      // 从内核缓冲区复制一块区域，对该映射的修改也会影响内核缓冲区中存储的数据
       val idx = mmap.duplicate
+      // 找到内存映射区中目标位移之前最新的key（槽位）
       val slot = largestLowerBoundSlotFor(idx, targetOffset, IndexSearchType.KEY)
-      if(slot == -1)
+      if(slot == -1) {
+        // 如果没有找到偏移量索引，则返回基本偏移量对应的键值对
         OffsetPosition(baseOffset, 0)
-      else
+      } else {
+        // 返回偏移量所对应键值对
         parseEntry(idx, slot)
+      }
     }
   }
 
@@ -139,14 +145,21 @@ class OffsetIndex(_file: File, baseOffset: Long, maxIndexSize: Int = -1, writabl
    * @throws IndexOffsetOverflowException if the offset causes index offset to overflow
    */
   def append(offset: Long, position: Int): Unit = {
+    // 加锁
     inLock(lock) {
+      // 没有槽可以添加新索引 抛异常
       require(!isFull, "Attempt to append to a full index (size = " + _entries + ").")
+      // 此索引的entry数量为0 或者给定偏移量大于当前最新偏移量
       if (_entries == 0 || offset > _lastOffset) {
         trace(s"Adding index entry $offset => $position to ${file.getAbsolutePath}")
+        // 写入给定偏移量的相对位移和物理地址
         mmap.putInt(relativeOffset(offset))
         mmap.putInt(position)
+        // 条目数+1
         _entries += 1
+        // 更新最新偏移量
         _lastOffset = offset
+        // 一个entry占8个字节，判断写入的所有entry总大小与文件物理内存大小是否一致
         require(_entries * entrySize == mmap.position(), entries + " entries but file position in index is " + mmap.position() + ".")
       } else {
         throw new InvalidOffsetException(s"Attempt to append an offset ($offset) to position $entries no larger than" +

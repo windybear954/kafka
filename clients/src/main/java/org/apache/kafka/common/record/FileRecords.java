@@ -160,11 +160,14 @@ public class FileRecords extends AbstractRecords implements Closeable {
      * @return the number of bytes written to the underlying file
      */
     public int append(MemoryRecords records) throws IOException {
+        // 追加的记录大小和当前日志段大小总和不能超过Integer.MAX_VALUE
         if (records.sizeInBytes() > Integer.MAX_VALUE - size.get())
             throw new IllegalArgumentException("Append of size " + records.sizeInBytes() +
                     " bytes is too large for segment with current file position at " + size.get());
 
+        // 将所有记录写入给定通道channel
         int written = records.writeFullyTo(channel);
+        // 更新当前文件的写入字节数
         size.getAndAdd(written);
         return written;
     }
@@ -173,6 +176,7 @@ public class FileRecords extends AbstractRecords implements Closeable {
      * Commit all written data to the physical disk
      */
     public void flush() throws IOException {
+        // 将内核缓冲区的数据持久化到磁盘
         channel.force(true);
     }
 
@@ -299,6 +303,7 @@ public class FileRecords extends AbstractRecords implements Closeable {
      * @param startingPosition The starting position in the file to begin searching from.
      */
     public LogOffsetPosition searchForOffsetWithSize(long targetOffset, int startingPosition) {
+        // 从开始位置通过文件批处理迭代器，实现快速查找日志物理文件位置和消息大小
         for (FileChannelRecordBatch batch : batchesFrom(startingPosition)) {
             long offset = batch.lastOffset();
             if (offset >= targetOffset)

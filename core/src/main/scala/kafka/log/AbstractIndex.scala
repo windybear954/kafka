@@ -213,6 +213,7 @@ abstract class AbstractIndex(@volatile var file: File, val baseOffset: Long, val
    */
   def flush(): Unit = {
     inLock(lock) {
+      // 将索引更新到mmap
       mmap.force()
     }
   }
@@ -370,13 +371,16 @@ abstract class AbstractIndex(@volatile var file: File, val baseOffset: Long, val
     if(_entries == 0)
       return (-1, -1)
 
+    // 二分查找
     def binarySearch(begin: Int, end: Int) : (Int, Int) = {
       // binary search for the entry
       var lo = begin
       var hi = end
       while(lo < hi) {
         val mid = (lo + hi + 1) >>> 1
+        // 取去缓冲区中间的插槽key
         val found = parseEntry(idx, mid)
+        // 比较并更新上下限
         val compareResult = compareIndexEntry(found, target, searchEntity)
         if(compareResult > 0)
           hi = mid - 1
@@ -388,16 +392,20 @@ abstract class AbstractIndex(@volatile var file: File, val baseOffset: Long, val
       (lo, if (lo == _entries - 1) -1 else lo + 1)
     }
 
+    // 先定位到热区的第一个热键位置，向后进行二分查找
     val firstHotEntry = Math.max(0, _entries - 1 - _warmEntries)
     // check if the target offset is in the warm section of the index
+    // 如果要查找的索引键在热键之后，在热区内二分查找
     if(compareIndexEntry(parseEntry(idx, firstHotEntry), target, searchEntity) < 0) {
       return binarySearch(firstHotEntry, _entries - 1)
     }
 
     // check if the target offset is smaller than the least offset
+    // 如果要查找的偏移量小于最小偏移量，则key位置返回-1
     if(compareIndexEntry(parseEntry(idx, 0), target, searchEntity) > 0)
       return (-1, 0)
 
+    // 在非热区中查找目标key
     binarySearch(0, firstHotEntry)
   }
 
@@ -415,6 +423,7 @@ abstract class AbstractIndex(@volatile var file: File, val baseOffset: Long, val
   private def roundDownToExactMultiple(number: Int, factor: Int) = factor * (number / factor)
 
   private def toRelative(offset: Long): Option[Int] = {
+    // 计算相对位移
     val relativeOffset = offset - baseOffset
     if (relativeOffset < 0 || relativeOffset > Int.MaxValue)
       None

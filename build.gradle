@@ -19,10 +19,11 @@ import java.nio.charset.StandardCharsets
 
 buildscript {
   repositories {
-    mavenCentral()
-    jcenter()
+//    mavenCentral()
+//    jcenter()
     maven {
-      url "https://plugins.gradle.org/m2/"
+//      url "https://plugins.gradle.org/m2/"
+      url "https://maven.aliyun.com/repository/gradle-plugin"
     }
   }
   apply from: file('gradle/buildscript.gradle'), to: buildscript
@@ -52,7 +53,10 @@ spotless {
 allprojects {
 
   repositories {
-    mavenCentral()
+//    mavenCentral()
+    maven{ url 'https://maven.aliyun.com/repository/central' }
+    maven{ url 'https://maven.aliyun.com/repository/public' }
+    maven{ url 'https://maven.aliyun.com/repository/gradle-plugin'}
   }
 
   apply plugin: 'idea'
